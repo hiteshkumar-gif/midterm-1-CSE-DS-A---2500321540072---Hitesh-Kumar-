@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Library Management System</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="top-inner">
+      <h1>Library</h1>
+      <p class="count" id="count" aria-live="polite"></p>
+      <button class="btn primary" id="addBtn" type="button">Add book</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="filters" aria-label="Search books">
+      <label>Title
+        <input type="search" id="fTitle" placeholder="Search by title" />
+      </label>
+      <label>Author
+        <input type="search" id="fAuthor" placeholder="Search by author" />
+      </label>
+      <label>Category
+        <select id="fCategory"><option value="">All categories</option></select>
+      </label>
+      <button class="btn ghost" id="clearBtn" type="button">Clear filters</button>
+    </section>
+
+    <section aria-label="Books">
+      <ul class="shelf" id="shelf"></ul>
+      <p class="empty" id="empty" hidden></p>
+    </section>
+
+    <nav class="pager" id="pager" aria-label="Pagination" hidden>
+      <button class="btn ghost" id="prevBtn" type="button">Previous</button>
+      <span id="pageInfo"></span>
+      <button class="btn ghost" id="nextBtn" type="button">Next</button>
+    </nav>
+  </main>
+
+  <dialog id="formDialog">
+    <form id="bookForm" novalidate>
+      <h2 id="formTitle">Add book</h2>
+      <input type="hidden" id="bookId" />
+      <label>Title
+        <input type="text" id="title" required autocomplete="off" />
+      </label>
+      <label>Author
+        <input type="text" id="author" required autocomplete="off" />
+      </label>
+      <label>Category
+        <input type="text" id="category" list="categoryList" required autocomplete="off" />
+        <datalist id="categoryList"></datalist>
+      </label>
+      <p class="form-error" id="formError" role="alert" hidden></p>
+      <div class="actions">
+        <button class="btn ghost" type="button" id="cancelBtn">Cancel</button>
+        <button class="btn primary" type="submit" id="saveBtn">Save book</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="deleteDialog">
+    <form method="dialog" class="confirm">
+      <h2>Delete this book?</h2>
+      <p id="deleteText"></p>
+      <div class="actions">
+        <button class="btn ghost" value="cancel">Keep book</button>
+        <button class="btn danger" value="confirm" id="confirmDelete">Delete book</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <script>
+const API = "/api";
+const LIMIT = 8;
+const state = { page: 1, title: "", author: "", category: "" };
+
+const $ = (id) => document.getElementById(id);
+const shelf = $("shelf");
+const palette = ["#1c5d52", "#b5472f", "#3d5a9e", "#8a6d1f", "#7a3f8f", "#2f7d4a", "#b04a7a", "#4a6572"];
+
+function spineColor(category) {
+  let h = 0;
+  for (const ch of category.toLowerCase()) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return palette[h % palette.length];
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(API + path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data.errors ? data.errors.join(", ") : data.error || "Something went wrong";
+    throw new Error(msg);
+  }
+  return data;
+}
+
+let toastTimer;
+function toast(message) {
+  const el = $("toast");
+  el.textContent = message;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.hidden = true), 2800);
+}
+
+/* ---------- Loading ---------- */
+
+async function loadCategories() {
+  const categories = await api("/categories");
+  const select = $("fCategory");
+  select.innerHTML = '<option value="">All categories</option>';
+  $("categoryList").innerHTML = "";
+  for (const c of categories) {
+    select.add(new Option(c, c));
+    const opt = document.createElement("option");
+    opt.value = c;
+    $("categoryList").append(opt);
+  }
+  select.value = categories.includes(state.category) ? state.category : "";
+  if (select.value !== state.category) state.category = select.value;
+}
+
+async function loadBooks() {
+  const params = new URLSearchParams({ page: state.page, limit: LIMIT });
+  for (const key of ["title", "author", "category"]) {
+    if (state[key]) params.set(key, state[key]);
+  }
+  try {
+    const result = await api("/books?" + params);
+    if (result.totalPages > 0 && state.page > result.totalPages) {
+      state.page = result.totalPages;
+      return loadBooks();
+    }
+    render(result);
+  } catch (err) {
+    shelf.innerHTML = "";
+    showEmpty("Can’t reach the library server. Start it with npm start, then reload.");
+  }
+}
+
+function showEmpty(text) {
+  const el = $("empty");
+  el.textContent = text;
+  el.hidden = false;
+}
+
+function render({ data, total, page, totalPages }) {
+  $("count").textContent = total === 1 ? "1 book" : `${total} books`;
+  shelf.innerHTML = "";
+  $("empty").hidden = data.length > 0;
+
+  if (!data.length) {
+    const filtered = state.title || state.author || state.category;
+    showEmpty(filtered ? "No books match these filters. Try clearing them." : "The shelf is empty. Add your first book.");
+  }
+
+  for (const book of data) {
+    const li = document.createElement("li");
+    li.className = "book";
+    li.style.setProperty("--spine", spineColor(book.category));
+    li.innerHTML = `
+      <span class="spine" aria-hidden="true"></span>
+      <div class="info">
+        <h3></h3>
+        <p></p>
+        <span class="tag"></span>
+      </div>
+      <div class="row-actions">
+        <button class="btn ghost small" data-act="edit" type="button">Edit</button>
+        <button class="btn ghost small" data-act="delete" type="button">Delete</button>
+      </div>`;
+    li.querySelector("h3").textContent = book.title;
+    li.querySelector("p").textContent = book.author;
+    li.querySelector(".tag").textContent = book.category;
+    li.querySelector('[data-act="edit"]').addEventListener("click", () => openForm(book));
+    li.querySelector('[data-act="delete"]').addEventListener("click", () => confirmDelete(book));
+    shelf.append(li);
+  }
+
+  $("pager").hidden = totalPages <= 1;
+  $("pageInfo").textContent = `Page ${page} of ${totalPages}`;
+  $("prevBtn").disabled = page <= 1;
+  $("nextBtn").disabled = page >= totalPages;
+}
+
+/* ---------- Filters ---------- */
+
+let debounce;
+function onFilter() {
+  clearTimeout(debounce);
+  debounce = setTimeout(() => {
+    state.title = $("fTitle").value.trim();
+    state.author = $("fAuthor").value.trim();
+    state.category = $("fCategory").value;
+    state.page = 1;
+    loadBooks();
+  }, 250);
+}
+$("fTitle").addEventListener("input", onFilter);
+$("fAuthor").addEventListener("input", onFilter);
+$("fCategory").addEventListener("change", onFilter);
+$("clearBtn").addEventListener("click", () => {
+  $("fTitle").value = $("fAuthor").value = $("fCategory").value = "";
+  onFilter();
+});
+$("prevBtn").addEventListener("click", () => { state.page--; loadBooks(); });
+$("nextBtn").addEventListener("click", () => { state.page++; loadBooks(); });
+
+/* ---------- Add / edit ---------- */
+
+const formDialog = $("formDialog");
+
+function openForm(book) {
+  $("formTitle").textContent = book ? "Edit book" : "Add book";
+  $("bookId").value = book ? book.id : "";
+  $("title").value = book ? book.title : "";
+  $("author").value = book ? book.author : "";
+  $("category").value = book ? book.category : "";
+  $("formError").hidden = true;
+  formDialog.showModal();
+  $("title").focus();
+}
+
+$("addBtn").addEventListener("click", () => openForm());
+$("cancelBtn").addEventListener("click", () => formDialog.close());
+
+$("bookForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const id = $("bookId").value;
+  const body = JSON.stringify({
+    title: $("title").value,
+    author: $("author").value,
+    category: $("category").value,
+  });
+  $("saveBtn").disabled = true;
+  try {
+    await api(id ? `/books/${id}` : "/books", { method: id ? "PUT" : "POST", body });
+    formDialog.close();
+    toast(id ? "Book updated" : "Book added");
+    await loadCategories();
+    await loadBooks();
+  } catch (err) {
+    $("formError").textContent = err.message;
+    $("formError").hidden = false;
+  } finally {
+    $("saveBtn").disabled = false;
+  }
+});
+
+/* ---------- Delete ---------- */
+
+const deleteDialog = $("deleteDialog");
+let pendingDelete = null;
+
+function confirmDelete(book) {
+  pendingDelete = book;
+  $("deleteText").textContent = `“${book.title}” by ${book.author} will be removed from the library.`;
+  deleteDialog.showModal();
+}
+
+deleteDialog.addEventListener("close", async () => {
+  if (deleteDialog.returnValue !== "confirm" || !pendingDelete) return;
+  const book = pendingDelete;
+  pendingDelete = null;
+  try {
+    await api(`/books/${book.id}`, { method: "DELETE" });
+    toast("Book deleted");
+    await loadCategories();
+    await loadBooks();
+  } catch (err) {
+    toast(err.message);
+  }
+});
+
+/* ---------- Start ---------- */
+
+loadCategories().then(loadBooks).catch(loadBooks);
+</script>
+</body>
+</html>
